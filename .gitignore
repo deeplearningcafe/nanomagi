@@ -1,0 +1,7 @@
+/results
+*__pycache__/
+*.egg-info
+data/*
+results/
+*.pid
+tokenizer/

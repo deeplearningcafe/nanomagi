@@ -1,0 +1,25 @@
+[project]
+name = "nanomagi"
+version = "0.1.0"
+description = "A research framework for training LLMs from scratch."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "aipracticecafe" }]
+keywords = ["ai", "llm", "text-generation", "pytorch"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Operating System :: OS Independent",
+]
+
+dependencies = [
+  "bitsandbytes>=0.46.1",
+  "numpy>=2.0.0",
+  "omegaconf>=2.3.0",
+  "safetensors>=0.7.0",
+  "tqdm==4.67.1",
+  "transformers>=5.5.0",
+  "huggingface-hub>=0.29.0",
+  "pyarrow>=21.0.0",
+]
