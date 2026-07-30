@@ -7,11 +7,17 @@ logger = logging.getLogger(__name__)
 
 @torch.no_grad()
 def log_generations(
-    model, tokenizer, step, device, prompts, output_dir="results", max_gen_tokens=64
+    model,
+    tokenizer,
+    step,
+    device,
+    prompts,
+    output_dir="results",
+    max_gen_tokens=64,
+    temperature=1.0,
 ):
     """
-    Deterministic training callback using greedy decoding (temperature=0.0)
-    to trace qualitative generative progression over steps.
+    Training callback to trace qualitative generative progression over steps.
     Saves outputs to a local Markdown tracker.
     """
     model.eval()
@@ -26,7 +32,7 @@ def log_generations(
             model.generate(
                 tokens,
                 max_tokens=max_gen_tokens,
-                temperature=0.0,
+                temperature=temperature,
             )
         )
         decoded_text = tokenizer.decode(generated_ids)

@@ -1,5 +1,5 @@
 import os
-import math
+import random
 import logging
 import torch
 from collections import Counter
@@ -34,6 +34,21 @@ def char_f1_score(prediction: str, ground_truth: str) -> float:
     return f1
 
 
+def get_fewshot_examples(dataset, exclude_idx, num_fewshot, seed=42):
+    """
+    Deterministically samples in-context examples from the dataset split,
+    guaranteeing that the current test index is excluded.
+    """
+    if num_fewshot <= 0:
+        return []
+    rng = random.Random(seed + exclude_idx)
+    available_indices = [i for i in range(len(dataset)) if i != exclude_idx]
+    fewshot_indices = rng.sample(
+        available_indices, min(num_fewshot, len(available_indices))
+    )
+    return [dataset[i] for i in fewshot_indices]
+
+
 def get_choice_ll(model, tokenizer, device, context_tokens, choice_str):
     """
     Calculates the exact token log-likelihood of a choice string given
@@ -58,10 +73,23 @@ def get_choice_ll(model, tokenizer, device, context_tokens, choice_str):
     return gathered.sum().item()
 
 
-def evaluate_jcommonsenseqa(model, tokenizer, device, num_samples=100):
+def build_jcommonsenseqa_prompt(item, fewshot_items):
+    """Formats multiple-choice items into few-shot context."""
+    prompt = ""
+    for fs in fewshot_items:
+        label = fs["label"]
+        correct_choice = fs[f"choice{label}"]
+        prompt += f"質問: {fs['question']}\n回答: {correct_choice}\n\n"
+    prompt += f"質問: {item['question']}\n回答: "
+    return prompt
+
+
+def evaluate_jcommonsenseqa(
+    model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42
+):
     """
-    Computes JCommonsenseQA accuracy on the validation split using
-    choice-level log-likelihood scoring.
+    Computes JCommonsenseQA validation split accuracy.
+    Uses log-likelihood of the choice options directly.
     """
     try:
         ds = load_dataset(
@@ -79,8 +107,12 @@ def evaluate_jcommonsenseqa(model, tokenizer, device, num_samples=100):
 
     for idx in range(total):
         item = ds[idx]
-        prompt = f"質問: {item['question']}\n回答: "
+        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        prompt = build_jcommonsenseqa_prompt(item, fewshot_items)
         context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+
+        if len(context_tokens) > 2048:
+            context_tokens = context_tokens[-2048:]
 
         choices = [
             item["choice0"],
@@ -105,10 +137,21 @@ def evaluate_jcommonsenseqa(model, tokenizer, device, num_samples=100):
     return correct / max(1, total)
 
 
-def evaluate_jmmlu(model, tokenizer, device, num_samples=100):
+def build_jmmlu_prompt(item, fewshot_items):
+    """Formats JMMLU items into a few-shot context."""
+    prompt = ""
+    for fs in fewshot_items:
+        label = fs["label"]
+        correct_choice = fs[f"choice{label}"]
+        prompt += f"質問: {fs['question']}\n回答: {correct_choice}\n\n"
+    prompt += f"質問: {item['question']}\n回答: "
+    return prompt
+
+
+def evaluate_jmmlu(model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42):
     """
-    Computes JMMLU accuracy on the test split using choice-level
-    log-likelihood scoring.
+    Computes JMMLU test split accuracy.
+    Uses log-likelihood of choice options.
     """
     try:
         ds = load_dataset(
@@ -126,8 +169,12 @@ def evaluate_jmmlu(model, tokenizer, device, num_samples=100):
 
     for idx in range(total):
         item = ds[idx]
-        prompt = f"質問: {item['question']}\n回答: "
+        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        prompt = build_jmmlu_prompt(item, fewshot_items)
         context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+
+        if len(context_tokens) > 2048:
+            context_tokens = context_tokens[-2048:]
 
         choices = [
             item["choice0"],
@@ -151,9 +198,24 @@ def evaluate_jmmlu(model, tokenizer, device, num_samples=100):
     return correct / max(1, total)
 
 
-def evaluate_jsquad(model, tokenizer, device, num_samples=100):
+def build_jsquad_prompt(item, fewshot_items):
+    """Formats JSQuAD context and question pairs into few-shot structures."""
+    prompt = ""
+    for fs in fewshot_items:
+        gold_text = ""
+        if fs["answers"]["text"]:
+            gold_text = fs["answers"]["text"][0]
+        prompt += (
+            f"文脈: {fs['context']}\n質問: {fs['question']}\n回答: {gold_text}\n\n"
+        )
+    prompt += f"文脈: {item['context']}\n質問: {item['question']}\n回答: "
+    return prompt
+
+
+def evaluate_jsquad(model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42):
     """
-    Computes JSQuAD EM and Character F1 scores using greedy decoding.
+    Computes JSQuAD validation split exact match (EM) and character F1.
+    Uses greedy decoding starting from prompt context.
     """
     try:
         ds = load_dataset(
@@ -173,8 +235,12 @@ def evaluate_jsquad(model, tokenizer, device, num_samples=100):
 
     for idx in range(total):
         item = ds[idx]
-        prompt = f"文脈: {item['context']}\n質問: {item['question']}\n回答: "
+        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        prompt = build_jsquad_prompt(item, fewshot_items)
         tokens = tokenizer.encode(prompt, prepend=bos_id)
+
+        if len(tokens) > 2048:
+            tokens = tokens[-2048:]
 
         generated_ids = list(model.generate(tokens, max_tokens=32, temperature=0.0))
         prediction = tokenizer.decode(generated_ids).strip()
@@ -199,10 +265,27 @@ def evaluate_jsquad(model, tokenizer, device, num_samples=100):
     return total_em / max(1, total), total_f1 / max(1, total)
 
 
-def evaluate_niilc_qa(model, tokenizer, device, num_samples=100):
+def build_niilc_prompt(item, fewshot_items):
+    """Formats NIILC-QA items into few-shot structures."""
+    prompt = ""
+    for fs in fewshot_items:
+        q = fs.get("text") or fs.get("question")
+        ans = ""
+        if fs.get("answers"):
+            ans = fs.get("answers")[0]
+        prompt += f"質問: {q}\n回答: {ans}\n\n"
+
+    q_target = item.get("text") or item.get("question")
+    prompt += f"質問: {q_target}\n回答: "
+    return prompt
+
+
+def evaluate_niilc_qa(
+    model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42
+):
     """
-    Computes NIILC-QA (v1.2) EM and F1 scores using greedy decoding
-    on the dev/validation split.
+    Computes NIILC-QA (v1.2) dev split exact match (EM) and character F1.
+    Uses greedy decoding starting from prompt context.
     """
     try:
         ds = load_dataset(
@@ -216,7 +299,7 @@ def evaluate_niilc_qa(model, tokenizer, device, num_samples=100):
             ds = load_dataset(
                 "sbintuitions/niilc-qa",
                 name="v1.2",
-                split="validation",
+                split="test",
                 cache_dir="data/eval",
             )
         except Exception as e2:
@@ -235,8 +318,12 @@ def evaluate_niilc_qa(model, tokenizer, device, num_samples=100):
         if not question:
             continue
 
-        prompt = f"質問: {question}\n回答: "
+        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        prompt = build_niilc_prompt(item, fewshot_items)
         tokens = tokenizer.encode(prompt, prepend=bos_id)
+
+        if len(tokens) > 2048:
+            tokens = tokens[-2048:]
 
         generated_ids = list(model.generate(tokens, max_tokens=32, temperature=0.0))
         prediction = tokenizer.decode(generated_ids).strip()
@@ -261,31 +348,67 @@ def evaluate_niilc_qa(model, tokenizer, device, num_samples=100):
     return total_em / max(1, total), total_f1 / max(1, total)
 
 
-def run_unified_evaluation(model, tokenizer, device, val_path=None, num_samples=100):
+def run_unified_evaluation(
+    model,
+    tokenizer,
+    device,
+    val_path=None,
+    num_samples=100,
+    num_fewshot=4,
+    seed=42,
+):
     """
-    Synchronously runs all four Japanese benchmarks and computes
-    holdout loss and perplexity.
+    Synchronously runs the evaluations on all 4 Japanese benchmarks
+    plus local holdout validation PPL using N-shot prompting.
     """
     raw_model = get_raw_model(model)
     raw_model.eval()
 
     results = {}
 
-    logger.info("Evaluating JCommonsenseQA...")
-    jc_acc = evaluate_jcommonsenseqa(raw_model, tokenizer, device, num_samples)
+    logger.info(f"Evaluating JCommonsenseQA ({num_fewshot}-shot)...")
+    jc_acc = evaluate_jcommonsenseqa(
+        raw_model,
+        tokenizer,
+        device,
+        num_samples,
+        num_fewshot,
+        seed=seed,
+    )
     results["eval/jcommonsenseqa_acc"] = jc_acc
 
-    logger.info("Evaluating JMMLU...")
-    jmmlu_acc = evaluate_jmmlu(raw_model, tokenizer, device, num_samples)
+    logger.info(f"Evaluating JMMLU ({num_fewshot}-shot)...")
+    jmmlu_acc = evaluate_jmmlu(
+        raw_model,
+        tokenizer,
+        device,
+        num_samples,
+        num_fewshot,
+        seed=seed,
+    )
     results["eval/jmmlu_acc"] = jmmlu_acc
 
-    logger.info("Evaluating JSQuAD...")
-    js_em, js_f1 = evaluate_jsquad(raw_model, tokenizer, device, num_samples)
+    logger.info(f"Evaluating JSQuAD ({num_fewshot}-shot)...")
+    js_em, js_f1 = evaluate_jsquad(
+        raw_model,
+        tokenizer,
+        device,
+        num_samples,
+        num_fewshot,
+        seed=seed,
+    )
     results["eval/jsquad_em"] = js_em
     results["eval/jsquad_f1"] = js_f1
 
-    logger.info("Evaluating NIILC-QA...")
-    ni_em, ni_f1 = evaluate_niilc_qa(raw_model, tokenizer, device, num_samples)
+    logger.info(f"Evaluating NIILC-QA ({num_fewshot}-shot)...")
+    ni_em, ni_f1 = evaluate_niilc_qa(
+        raw_model,
+        tokenizer,
+        device,
+        num_samples,
+        num_fewshot,
+        seed=seed,
+    )
     results["eval/niilc_em"] = ni_em
     results["eval/niilc_f1"] = ni_f1
 

@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 from omegaconf import DictConfig, OmegaConf
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from datetime import datetime
 
 from nanomagi.dataloader import (
     tokenizing_distributed_data_loader_with_state_bos_bestfit as get_dataloader,
@@ -126,6 +127,7 @@ class Trainer:
 
         self.eval_interval = self.config.training.get("eval_interval", 100)
         self.sample_interval = self.config.training.get("sample_interval", 50)
+        # it should be the same with the seed so no need to timestamp
         self.val_path = self.config.training.get("val_path", "data/eval.json")
         dirname = os.path.dirname(self.val_path)
         if dirname:
@@ -133,7 +135,7 @@ class Trainer:
 
         self.num_val_samples = self.config.data.get("num_val_samples", 10000)
         self.save_interval = self.config.training.get("save_interval", 1000)
-        self.output_dir = self.config.training.get("output_dir", "results/checkpoints")
+        self.output_dir = self.config.training.get("save_dir", "results")
         os.makedirs(self.output_dir, exist_ok=True)
 
         if hasattr(torch, "compile") and self.config.training.get(
@@ -223,9 +225,13 @@ class Trainer:
 
         return loss.detach()
 
-    def fit(self):
+    def fit(self, timestamp=None):
         """Runs the pretraining loop using step/iteration-based training."""
         logger.info("Initializing Autoregressive LLM pretraining...")
+        if not timestamp:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.output_dir = os.path.join(self.output_dir, timestamp)
+
         step = self.start_step
         stage = self.config.data.get("stage", 1)
         train_loader = get_dataloader(
@@ -314,11 +320,13 @@ class Trainer:
                         step=step,
                         device=self.device,
                         prompts=self.prompts,
+                        output_dir=self.output_dir,
+                        temperature=1.0,
                     )
                 if self.is_ddp:
                     dist.barrier()
 
-            # Benchmark evaluation (less frequent)
+            # Benchmark evaluation
             if self.eval_interval > 0 and step % self.eval_interval == 0:
                 if self.global_rank == 0:
                     logger.info(f"Running benchmark evaluation at step {step}")
@@ -329,6 +337,8 @@ class Trainer:
                             device=self.device,
                             val_path=self.val_path,
                             num_samples=100,
+                            num_fewshot=4,
+                            seed=self.seed,
                         )
                         if self.use_wandb:
                             eval_results["step"] = step
@@ -344,7 +354,7 @@ class Trainer:
                 if self.global_rank == 0:
                     logger.info(f"Saving checkpoint at step {step}")
                     save_checkpoint(
-                        output_dir=self.output_dir,
+                        output_dir=os.join.path(self.output_dir, "checkpoints"),
                         step=step,
                         model=self.model.module if self.is_ddp else self.model,
                         optimizer=self.optimizer,

@@ -43,7 +43,7 @@ def create_optim_scheduler(model, total_steps: int, conf: omegaconf.DictConfig):
     param_groups = create_optimizer_param_groups(
         model, conf.optimizer.lr, conf.optimizer.get("wd", 0.01)
     )
-    if conf.get("use_bitsandbytes", False):
+    if conf.optimizer.get("use_bitsandbytes", False):
         import bitsandbytes as bnb
 
         optimizer = bnb.optim.AdamW8bit(

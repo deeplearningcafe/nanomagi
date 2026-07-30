@@ -32,7 +32,6 @@ training:
   eval_interval: 20
   sample_interval: 10
   resume_from_checkpoint: Null
-  use_bitsandbytes: True
   gradient_accumulation_steps: 8
   compile_model: True
   batch_size: 4
@@ -51,6 +50,7 @@ optimizer:
   wd: 0.02
   warmup_steps: 40
   final_lr_frac: 0.05
+  use_bitsandbytes: True
 
 sampling:
   sample_file: "sample.txt"
