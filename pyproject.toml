@@ -22,4 +22,5 @@ dependencies = [
   "transformers>=5.5.0",
   "huggingface-hub>=0.29.0",
   "pyarrow>=21.0.0",
+  "datasets==4.8.5",
 ]

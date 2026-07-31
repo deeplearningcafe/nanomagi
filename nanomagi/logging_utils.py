@@ -2,6 +2,8 @@ import sys
 import os
 import logging
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.ERROR)
 logging.getLogger("datasets").setLevel(logging.WARNING)
@@ -9,7 +11,6 @@ logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 logging.getLogger("datasets").propagate = False
 logging.getLogger("huggingface_hub").propagate = False
-
 
 class Logger:
     """

@@ -231,6 +231,9 @@ class Trainer:
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.output_dir = os.path.join(self.output_dir, timestamp)
+        os.makedirs(self.output_dir, exist_ok=True)
+        save_path = os.path.join(self.output_dir, "checkpoints")
+        os.makedirs(save_path, exist_ok=True)
 
         step = self.start_step
         stage = self.config.data.get("stage", 1)
@@ -354,7 +357,7 @@ class Trainer:
                 if self.global_rank == 0:
                     logger.info(f"Saving checkpoint at step {step}")
                     save_checkpoint(
-                        output_dir=os.join.path(self.output_dir, "checkpoints"),
+                        output_dir=save_path,
                         step=step,
                         model=self.model.module if self.is_ddp else self.model,
                         optimizer=self.optimizer,
