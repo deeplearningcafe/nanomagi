@@ -110,12 +110,39 @@ class Trainer:
         self.start_step = 0
         resume_dir = self.config.training.get("resume_from_checkpoint", None)
         if resume_dir:
+            ignore_scheduler = self.config.optimizer.get(
+                "ignore_checkpoint_scheduler", False
+            )
+
             self.start_step = load_from_checkpoint(
                 checkpoint_dir=resume_dir,
                 model=self.model,
                 optimizer=self.optimizer,
-                scheduler=self.scheduler,
+                scheduler=None if ignore_scheduler else self.scheduler,
             )
+            if ignore_scheduler:
+                stage_steps = self.config.training.get("stage_steps", -1)
+                if stage_steps > 0:
+                    self.num_iterations = self.start_step + stage_steps
+                else:
+                    stage_steps = max(1, self.num_iterations - self.start_step)
+
+                skip_warmup = self.config.optimizer.get("skip_warmup", False)
+                # TODO: clear memory
+                self.optimizer, self.scheduler = create_optim_scheduler(
+                    self.model,
+                    total_steps=stage_steps,
+                    conf=self.config,
+                    skip_warmup=skip_warmup,
+                )
+                # Re-load the optimizer state for the newly created optimizer
+                _ = load_from_checkpoint(
+                    checkpoint_dir=resume_dir,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=None,
+                )
+
 
         self.scaler = (
             torch.amp.GradScaler("cuda")
@@ -262,7 +289,8 @@ class Trainer:
             disable=self.global_rank != 0,
         )
 
-        while step < self.num_iterations:
+        while True:
+            is_last_step = step >= self.num_iterations
             accum_loss = torch.tensor([0.0], device=self.device)
             for micro_step in range(self.grad_accum_steps):
                 inputs, targets, state_dict = next(train_loader)
@@ -313,7 +341,7 @@ class Trainer:
                     )
                 pbar.set_postfix({"loss": f"{avg_loss.item():.4f}", "lr": f"{lr:.2e}"})
 
-            if self.sample_interval > 0 and step % self.sample_interval == 0:
+            if (self.sample_interval > 0 and step % self.sample_interval == 0) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Generating samples at step {step}")
 
@@ -330,7 +358,7 @@ class Trainer:
                     dist.barrier()
 
             # Benchmark evaluation
-            if self.eval_interval > 0 and step % self.eval_interval == 0:
+            if (self.eval_interval > 0 and step % self.eval_interval == 0) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Running benchmark evaluation at step {step}")
                     try:
@@ -353,7 +381,7 @@ class Trainer:
                 if self.is_ddp:
                     dist.barrier()
 
-            if self.save_interval > 0 and step % self.save_interval == 0:
+            if (self.save_interval > 0 and step % self.save_interval == 0) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Saving checkpoint at step {step}")
                     save_checkpoint(
@@ -366,6 +394,9 @@ class Trainer:
                     )
                 if self.is_ddp:
                     dist.barrier()
+
+            if is_last_step:
+                break
 
         pbar.close()
         if self.use_wandb and self.global_rank == 0:

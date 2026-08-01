@@ -34,15 +34,27 @@ def char_f1_score(prediction: str, ground_truth: str) -> float:
     return f1
 
 
-def get_fewshot_examples(dataset, exclude_idx, num_fewshot, seed=42):
+
+def get_fewshot_examples(dataset, eval_indices, num_fewshot, seed=42):
     """
     Deterministically samples in-context examples from the dataset split,
-    guaranteeing that the current test index is excluded.
+    guaranteeing that none of the active evaluation indices are used,
+    preventing eval-to-prompt leakage.
     """
     if num_fewshot <= 0:
         return []
-    rng = random.Random(seed + exclude_idx)
-    available_indices = [i for i in range(len(dataset)) if i != exclude_idx]
+    rng = random.Random(seed)
+    eval_set = set(eval_indices)
+    available_indices = [
+        i for i in range(len(dataset)) if i not in eval_set
+    ]
+    if len(available_indices) < num_fewshot:
+        available_indices = [
+            i for i in range(len(dataset)) if i not in eval_set
+        ]
+        if not available_indices:
+            available_indices = list(range(len(dataset)))
+
     fewshot_indices = rng.sample(
         available_indices, min(num_fewshot, len(available_indices))
     )
@@ -103,11 +115,16 @@ def evaluate_jcommonsenseqa(
 
     correct = 0
     total = min(num_samples, len(ds))
+    # assume dataset > total
+    # TODO: use the dev dataset
+    eval_indices = list(range(total))
     bos_id = tokenizer.get_bos_token_id()
 
     for idx in range(total):
         item = ds[idx]
-        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        fewshot_items = get_fewshot_examples(
+            ds, eval_indices, num_fewshot, seed=seed + idx
+        )
         prompt = build_jcommonsenseqa_prompt(item, fewshot_items)
         context_tokens = tokenizer.encode(prompt, prepend=bos_id)
 
@@ -165,11 +182,14 @@ def evaluate_jmmlu(model, tokenizer, device, num_samples=100, num_fewshot=4, see
 
     correct = 0
     total = min(num_samples, len(ds))
+    eval_indices = list(range(total))
     bos_id = tokenizer.get_bos_token_id()
 
     for idx in range(total):
         item = ds[idx]
-        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        fewshot_items = get_fewshot_examples(
+            ds, eval_indices, num_fewshot, seed=seed + idx
+        )
         prompt = build_jmmlu_prompt(item, fewshot_items)
         context_tokens = tokenizer.encode(prompt, prepend=bos_id)
 
@@ -228,6 +248,7 @@ def evaluate_jsquad(model, tokenizer, device, num_samples=100, num_fewshot=4, se
         return 0.0, 0.0
 
     total = min(num_samples, len(ds))
+    eval_indices = list(range(total))
     bos_id = tokenizer.get_bos_token_id()
 
     total_f1 = 0.0
@@ -235,7 +256,9 @@ def evaluate_jsquad(model, tokenizer, device, num_samples=100, num_fewshot=4, se
 
     for idx in range(total):
         item = ds[idx]
-        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        fewshot_items = get_fewshot_examples(
+            ds, eval_indices, num_fewshot, seed=seed + idx
+        )
         prompt = build_jsquad_prompt(item, fewshot_items)
         tokens = tokenizer.encode(prompt, prepend=bos_id)
 
@@ -307,6 +330,7 @@ def evaluate_niilc_qa(
             return 0.0, 0.0
 
     total = min(num_samples, len(ds))
+    eval_indices = list(range(total))
     bos_id = tokenizer.get_bos_token_id()
 
     total_f1 = 0.0
@@ -318,7 +342,9 @@ def evaluate_niilc_qa(
         if not question:
             continue
 
-        fewshot_items = get_fewshot_examples(ds, idx, num_fewshot, seed=seed)
+        fewshot_items = get_fewshot_examples(
+            ds, eval_indices, num_fewshot, seed=seed + idx
+        )
         prompt = build_niilc_prompt(item, fewshot_items)
         tokens = tokenizer.encode(prompt, prepend=bos_id)
 

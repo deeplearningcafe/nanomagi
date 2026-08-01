@@ -46,7 +46,7 @@ def main():
         num_fewshot=4,
     )
     for k, v in eval_results.items():
-        print(f"Final {k}: {v:.4f}")
+        logging.info(f"Final {k}: {v:.4f}")
         if trainer.use_wandb:
             trainer.wandb.log({f"final/{k}": v})
 
