@@ -25,7 +25,7 @@ def get_mixed_streaming_dataset(
 
     fw_ds = load_dataset(
         "hotchpotch/fineweb-2-edu-japanese",
-        name="sample_10BT",
+        name="default", #"sample_10BT",
         split="train",
         streaming=True,
     ).select_columns(["text"])
@@ -123,3 +123,41 @@ def load_static_validation_dataset(val_path: str):
             if line.strip():
                 dataset.append(json.loads(line))
     return dataset
+
+def get_sft_dataset(split="train", num_samples=15000, seed=42):
+    """
+    Loads and preprocesses the aya-ja-evol-instruct-calm3-dpo-masked dataset.
+    Given resource constraints and to preserve pretraining knowledge, we train
+    only on 10k-20k samples for SFT.
+    """
+    ds = load_dataset(
+        "weblab-GENIAC/aya-ja-evol-instruct-calm3-dpo-masked",
+        split="train",
+    )
+    ds = ds.shuffle(seed=seed)
+
+    def preprocess_example(example):
+        messages = []
+        for msg in example["prompt"]:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        messages.append({
+            "role": "assistant",
+            "content": example["chosen"]
+        })
+        return {"messages": messages}
+
+    ds = ds.map(preprocess_example)
+
+    # Disjoint split
+    val_size = num_samples // 4
+    if split == "train":
+        ds = ds.select(range(val_size, val_size + num_samples))
+    elif split == "val":
+        ds = ds.select(range(0, val_size))
+    else:
+        raise ValueError(f"Invalid split: {split}")
+
+    return ds

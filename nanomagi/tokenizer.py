@@ -1,6 +1,7 @@
 import os
 from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders, Regex
 from tokenizers.models import BPE
+import copy
 
 # GPT-4 split pattern optimized with a 2-digit limit for small vocabs
 SPLIT_PATTERN = (
@@ -171,3 +172,67 @@ class HFBPETokenizer:
             return bytes(byte_list)
         except KeyError:
             return token_str.encode("utf-8")
+
+    def render_conversation(self, conversation, max_tokens=2048):
+        """
+        Tokenize a single chat conversation.
+        Returns:
+        - ids: list[int] of token ids of this rendered conversation
+        - mask: list[int] of same length, mask = 1 for assistant tokens.
+        """
+        ids, mask = [], []
+        def add_tokens(token_ids, mask_val):
+            if isinstance(token_ids, int):
+                token_ids = [token_ids]
+            ids.extend(token_ids)
+            mask.extend([mask_val] * len(token_ids))
+
+        messages = conversation["messages"]
+        if messages[0]["role"] == "system":
+            messages = copy.deepcopy(messages)
+            assert messages[1]["role"] == "user", (
+                "System message must be followed by user message"
+            )
+            messages[1]["content"] = (
+                messages[0]["content"] + "\n\n" + messages[1]["content"]
+            )
+            messages = messages[1:]
+
+        bos = self.get_bos_token_id()
+        user_start = self.encode_special("<|user_start|>")
+        user_end = self.encode_special("<|user_end|>")
+        assistant_start = self.encode_special("<|assistant_start|>")
+        assistant_end = self.encode_special("<|assistant_end|>")
+
+        add_tokens(bos, 0)
+        for i, message in enumerate(messages):
+            must_be_from = "user" if i % 2 == 0 else "assistant"
+            assert message["role"] == must_be_from, (
+                f"Message {i} is from {message['role']} "
+                f"but should be {must_be_from}"
+            )
+            content = message["content"]
+            if message["role"] == "user":
+                val_ids = self.encode(content)
+                add_tokens(user_start, 0)
+                add_tokens(val_ids, 0)
+                add_tokens(user_end, 0)
+            elif message["role"] == "assistant":
+                val_ids = self.encode(content)
+                add_tokens(assistant_start, 0)
+                add_tokens(val_ids, 1)
+                add_tokens(assistant_end, 1)
+
+        ids = ids[:max_tokens]
+        mask = mask[:max_tokens]
+        return ids, mask
+
+    def render_for_completion(self, conversation):
+        conversation = copy.deepcopy(conversation)
+        messages = conversation["messages"]
+        if messages[-1]["role"] == "assistant":
+            messages.pop()
+        ids, _ = self.render_conversation(conversation)
+        assistant_start = self.encode_special("<|assistant_start|>")
+        ids.append(assistant_start)
+        return ids

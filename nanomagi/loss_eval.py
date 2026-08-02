@@ -102,3 +102,63 @@ def compute_perplexity(model, tokenizer, val_path, device, max_len=2048):
     mean_loss = total_loss / max(1, total_tokens)
     ppl = math.exp(mean_loss) if mean_loss < 50 else float("inf")
     return ppl, mean_loss
+
+@torch.no_grad()
+def evaluate_sft_val_loss(
+    model, val_loader, eval_steps, device, ignore_index=-1
+):
+    model.eval()
+    total_loss = 0.0
+    total_active_tokens = 0
+    steps_conducted = 0
+
+    for _ in range(eval_steps):
+        try:
+            inputs, targets, _ = next(val_loader)
+        except StopIteration:
+            break
+
+        inputs = inputs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        logits = model(inputs)
+
+        shift_logits = logits.view(-1, logits.size(-1))
+        shift_targets = targets.view(-1)
+
+        active_mask = shift_targets != ignore_index
+        num_active_tokens = active_mask.sum().item()
+
+        if num_active_tokens == 0:
+            continue
+
+        loss_fct = torch.nn.CrossEntropyLoss(
+            ignore_index=ignore_index, reduction="sum"
+        )
+        sum_loss = loss_fct(shift_logits, shift_targets)
+
+        total_loss += sum_loss.item()
+        total_active_tokens += num_active_tokens
+        steps_conducted += 1
+
+    t_loss = torch.tensor(total_loss, device=device)
+    t_tokens = torch.tensor(
+        total_active_tokens, device=device, dtype=torch.float32
+    )
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(t_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(t_tokens, op=dist.ReduceOp.SUM)
+
+    total_loss_all = t_loss.item()
+    total_tokens_all = t_tokens.item()
+
+    if total_tokens_all == 0:
+        return float("inf"), float("inf")
+
+    mean_val_loss = total_loss_all / total_tokens_all
+    val_ppl = (
+        math.exp(mean_val_loss) if mean_val_loss < 20 else float("inf")
+    )
+
+    model.train()
+    return mean_val_loss, val_ppl

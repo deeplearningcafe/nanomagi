@@ -13,6 +13,7 @@ from datetime import datetime
 from nanomagi.dataloader import (
     tokenizing_distributed_data_loader_with_state_bos_bestfit as get_dataloader,
 )
+from nanomagi.dataloader import sft_data_loader_bos_bestfit
 from nanomagi.utils import (
     get_model,
     get_tokenizer,
@@ -88,19 +89,6 @@ class Trainer:
         else:
             raise ValueError("No valid training horizon specified in config.")
 
-        if self.global_rank == 0:
-            logger.info(
-                f"Model Non-Embedding Params: "
-                f"{self.non_embed_params / 1e6:.2f}M | "
-                f"Embedding Params: "
-                f"{self.model.embed_params() / 1e6:.2f}M"
-            )
-            logger.info(
-                f"FLOPs per token: {self.num_flops_per_token:.2e} | "
-                f"Tokens per step: {self.tokens_per_step:,}"
-            )
-            logger.info(f"Total training iterations: {self.num_iterations:,}")
-
         self.optimizer, self.scheduler = create_optim_scheduler(
             self.model,
             total_steps=self.num_iterations,
@@ -142,6 +130,19 @@ class Trainer:
                     optimizer=self.optimizer,
                     scheduler=None,
                 )
+
+        if self.global_rank == 0:
+            logger.info(
+                f"Model Non-Embedding Params: "
+                f"{self.non_embed_params / 1e6:.2f}M | "
+                f"Embedding Params: "
+                f"{self.model.embed_params() / 1e6:.2f}M"
+            )
+            logger.info(
+                f"FLOPs per token: {self.num_flops_per_token:.2e} | "
+                f"Tokens per step: {self.tokens_per_step:,}"
+            )
+            logger.info(f"Total training iterations: {self.num_iterations:,}")
 
 
         self.scaler = (
@@ -254,6 +255,9 @@ class Trainer:
 
     def fit(self, timestamp=None):
         """Runs the pretraining loop using step/iteration-based training."""
+        mode = self.config.experiment.get("mode", "train")
+        is_sft = mode == "sft"
+        sft_val_loader = None
         logger.info("Initializing Autoregressive LLM pretraining...")
         if not timestamp:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -263,21 +267,32 @@ class Trainer:
         os.makedirs(save_path, exist_ok=True)
 
         step = self.start_step
-        stage = self.config.data.get("stage", 1)
-        train_loader = get_dataloader(
-            tokenizer=self.tokenizer,
-            B=self.batch_size,
-            T=self.max_seq_len,
-            split="train",
-            stage=stage,
-            seed=self.seed,
-            num_val_samples=self.num_val_samples,
-            device=self.device,
-        )
-        # build val dataset
-        build_static_validation_set(
-            output_path=self.val_path, num_samples=self.num_val_samples, seed=self.seed
-        )
+        if mode == "sft":
+            train_loader = sft_data_loader_bos_bestfit(
+                tokenizer=self.tokenizer,
+                B=self.batch_size,
+                T=self.max_seq_len,
+                split="train",
+                seed=self.seed,
+                device=self.device,
+            )
+        else:
+            stage = self.config.data.get("stage", 1)
+            train_loader = get_dataloader(
+                tokenizer=self.tokenizer,
+                B=self.batch_size,
+                T=self.max_seq_len,
+                split="train",
+                stage=stage,
+                seed=self.seed,
+                num_val_samples=self.num_val_samples,
+                device=self.device,
+            )
+
+            # build val dataset, only pretraining
+            build_static_validation_set(
+                output_path=self.val_path, num_samples=self.num_val_samples, seed=self.seed
+            )
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -362,14 +377,26 @@ class Trainer:
                 if self.global_rank == 0:
                     logger.info(f"Running benchmark evaluation at step {step}")
                     try:
+                        # only created first time
+                        if is_sft and not sft_val_loader:
+                            sft_val_loader = sft_data_loader_bos_bestfit(
+                                tokenizer=self.tokenizer,
+                                B=self.batch_size,
+                                T=self.max_seq_len,
+                                split="val",
+                                seed=self.seed,
+                                device=self.device,
+                            )
                         eval_results = run_unified_evaluation(
                             model=self.model,
                             tokenizer=self.tokenizer,
                             device=self.device,
-                            val_path=self.val_path,
+                            val_path=self.val_path if not is_sft else None,
+                            val_loader=sft_val_loader,
                             num_samples=100,
                             num_fewshot=4,
                             seed=self.seed,
+                            is_chat=is_sft,
                         )
                         if self.use_wandb:
                             eval_results["step"] = step

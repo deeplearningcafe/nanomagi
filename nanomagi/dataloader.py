@@ -1,5 +1,9 @@
 import torch
 from nanomagi.dataset import get_mixed_streaming_dataset
+from nanomagi.dataset import get_sft_dataset
+from nanomagi.utils import get_dist_info
+
+
 
 
 def _document_batches(iterable_dataset, tokenizer_batch_size=128):
@@ -133,3 +137,103 @@ def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs)
     for inputs, targets, _ in loader:
         yield inputs, targets
+
+def sft_data_loader_bos_bestfit(
+    tokenizer,
+    B,
+    T,
+    split="train",
+    seed=42,
+    device="cuda",
+    buffer_size=100,
+):
+    """
+    SFT Dataloader with BOS-aligned Best-Fit Packing and loss masking.
+    Computes loss only on assistant part and masks padding.
+    """
+    dataset = get_sft_dataset(split=split, seed=seed)
+    dataset_size = len(dataset)
+    row_capacity = T + 1
+    bos_token = tokenizer.get_bos_token_id()
+
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+
+    # Conversation buffer: list of (token_ids, loss_mask) tuples
+    conv_buffer = []
+    cursor = ddp_rank
+    consumed = ddp_rank
+    epoch = 1
+
+    def refill_buffer():
+        nonlocal cursor, epoch
+        while len(conv_buffer) < buffer_size:
+            conversation = dataset[cursor]
+            ids, mask = tokenizer.render_conversation(
+                conversation, max_tokens=T
+            )
+            conv_buffer.append((ids, mask))
+            cursor += ddp_world_size
+            if cursor >= dataset_size:
+                cursor = cursor % dataset_size
+                epoch += 1
+
+    while True:
+        rows = []
+        mask_rows = []
+        row_lengths = []
+        for _ in range(B):
+            row = []
+            mask_row = []
+            padded = False
+            while len(row) < row_capacity:
+                while len(conv_buffer) < buffer_size:
+                    refill_buffer()
+
+                remaining = row_capacity - len(row)
+
+                best_idx = -1
+                best_len = 0
+                for i, (conv, _) in enumerate(conv_buffer):
+                    conv_len = len(conv)
+                    if conv_len <= remaining and conv_len > best_len:
+                        best_idx = i
+                        best_len = conv_len
+
+                if best_idx >= 0:
+                    conv, conv_mask = conv_buffer.pop(best_idx)
+                    row.extend(conv)
+                    mask_row.extend(conv_mask)
+                    consumed += ddp_world_size
+                else:
+                    content_len = len(row)
+                    row.extend([bos_token] * remaining)
+                    mask_row.extend([0] * remaining)
+                    padded = True
+                    break
+
+            if padded:
+                row_lengths.append(content_len)
+            else:
+                row_lengths.append(row_capacity)
+            rows.append(row[:row_capacity])
+            mask_rows.append(mask_row[:row_capacity])
+
+        use_cuda = device == "cuda"
+        batch_tensor = torch.tensor(rows, dtype=torch.long)
+        inputs = batch_tensor[:, :-1].to(
+            device=device, dtype=torch.long, non_blocking=use_cuda
+        ).contiguous()
+        targets = batch_tensor[:, 1:].to(
+            device=device, dtype=torch.long, non_blocking=use_cuda
+        ).contiguous()
+
+        mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
+        mask_targets = mask_tensor[:, 1:].to(device=device)
+        targets[mask_targets == 0] = -1
+
+        for i, content_len in enumerate(row_lengths):
+            if content_len < row_capacity:
+                targets[i, content_len-1:] = -1
+
+        state_dict = {"epoch": epoch, "consumed": consumed}
+        yield inputs, targets, state_dict

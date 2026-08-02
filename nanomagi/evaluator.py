@@ -4,7 +4,7 @@ import logging
 import torch
 from collections import Counter
 from datasets import load_dataset
-from nanomagi.loss_eval import compute_perplexity
+from nanomagi.loss_eval import compute_perplexity, evaluate_sft_val_loss
 from nanomagi.utils import get_raw_model
 
 os.environ["HF_DATASETS_CACHE"] = "data/eval"
@@ -97,11 +97,17 @@ def build_jcommonsenseqa_prompt(item, fewshot_items):
 
 
 def evaluate_jcommonsenseqa(
-    model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42
+    model,
+    tokenizer,
+    device,
+    num_samples=100,
+    num_fewshot=4,
+    seed=42,
+    is_chat=False,
 ):
     """
     Computes JCommonsenseQA validation split accuracy.
-    Uses log-likelihood of the choice options directly.
+    Supports both plain text and structured chat formatting.
     """
     try:
         ds = load_dataset(
@@ -125,22 +131,54 @@ def evaluate_jcommonsenseqa(
         fewshot_items = get_fewshot_examples(
             ds, eval_indices, num_fewshot, seed=seed + idx
         )
-        prompt = build_jcommonsenseqa_prompt(item, fewshot_items)
-        context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+        if is_chat:
+            messages = []
+            messages.append({
+                "role": "system",
+                "content": "あなたは親切なAIアシスタントです。"
+            })
+            for fs in fewshot_items:
+                label = fs["label"]
+                correct_choice = fs[f"choice{label}"]
+                messages.append({
+                    "role": "user",
+                    "content": f"質問: {fs['question']}"
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": f"回答: {correct_choice}"
+                })
+            messages.append({
+                "role": "user",
+                "content": f"質問: {item['question']}"
+            })
+            conversation = {"messages": messages}
+            context_tokens = tokenizer.render_for_completion(conversation)
+            choices = [
+                f"回答: {item['choice0']}",
+                f"回答: {item['choice1']}",
+                f"回答: {item['choice2']}",
+                f"回答: {item['choice3']}",
+                f"回答: {item['choice4']}",
+            ]
+        else:
+            prompt = build_jcommonsenseqa_prompt(item, fewshot_items)
+            context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+
+            choices = [
+                item["choice0"],
+                item["choice1"],
+                item["choice2"],
+                item["choice3"],
+                item["choice4"],
+            ]
+
+            best_choice_idx = -1
+            best_ll = -float("inf")
 
         if len(context_tokens) > 2048:
             context_tokens = context_tokens[-2048:]
 
-        choices = [
-            item["choice0"],
-            item["choice1"],
-            item["choice2"],
-            item["choice3"],
-            item["choice4"],
-        ]
-
-        best_choice_idx = -1
-        best_ll = -float("inf")
 
         for i, choice in enumerate(choices):
             ll = get_choice_ll(model, tokenizer, device, context_tokens, choice)
@@ -165,7 +203,15 @@ def build_jmmlu_prompt(item, fewshot_items):
     return prompt
 
 
-def evaluate_jmmlu(model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42):
+def evaluate_jmmlu(
+    model,
+    tokenizer,
+    device,
+    num_samples=100,
+    num_fewshot=4,
+    seed=42,
+    is_chat=False,
+):
     """
     Computes JMMLU test split accuracy.
     Uses log-likelihood of choice options.
@@ -190,18 +236,47 @@ def evaluate_jmmlu(model, tokenizer, device, num_samples=100, num_fewshot=4, see
         fewshot_items = get_fewshot_examples(
             ds, eval_indices, num_fewshot, seed=seed + idx
         )
-        prompt = build_jmmlu_prompt(item, fewshot_items)
-        context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+        if is_chat:
+            messages = []
+            messages.append({
+                "role": "system",
+                "content": "あなたは親切なAIアシスタントです。"
+            })
+            for fs in fewshot_items:
+                label = fs["label"]
+                correct_choice = fs[f"choice{label}"]
+                messages.append({
+                    "role": "user",
+                    "content": f"質問: {fs['question']}"
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": f"回答: {correct_choice}"
+                })
+            messages.append({
+                "role": "user",
+                "content": f"質問: {item['question']}"
+            })
+            conversation = {"messages": messages}
+            context_tokens = tokenizer.render_for_completion(conversation)
+            choices = [
+                f"回答: {item['choice0']}",
+                f"回答: {item['choice1']}",
+                f"回答: {item['choice2']}",
+                f"回答: {item['choice3']}",
+            ]
+        else:
+            prompt = build_jmmlu_prompt(item, fewshot_items)
+            context_tokens = tokenizer.encode(prompt, prepend=bos_id)
+            choices = [
+                item["choice0"],
+                item["choice1"],
+                item["choice2"],
+                item["choice3"],
+            ]
 
         if len(context_tokens) > 2048:
             context_tokens = context_tokens[-2048:]
-
-        choices = [
-            item["choice0"],
-            item["choice1"],
-            item["choice2"],
-            item["choice3"],
-        ]
 
         best_choice_idx = -1
         best_ll = -float("inf")
@@ -232,7 +307,16 @@ def build_jsquad_prompt(item, fewshot_items):
     return prompt
 
 
-def evaluate_jsquad(model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42):
+def evaluate_jsquad(
+    model,
+    tokenizer,
+    device,
+    num_samples=100,
+    num_fewshot=4,
+    seed=42,
+    is_chat=False,
+):
+
     """
     Computes JSQuAD validation split exact match (EM) and character F1.
     Uses greedy decoding starting from prompt context.
@@ -259,14 +343,52 @@ def evaluate_jsquad(model, tokenizer, device, num_samples=100, num_fewshot=4, se
         fewshot_items = get_fewshot_examples(
             ds, eval_indices, num_fewshot, seed=seed + idx
         )
-        prompt = build_jsquad_prompt(item, fewshot_items)
-        tokens = tokenizer.encode(prompt, prepend=bos_id)
+        if is_chat:
+            messages = []
+            messages.append({
+                "role": "system",
+                "content": "あなたは親切なAIアシスタントです。"
+            })
+            for fs in fewshot_items:
+                gold_text = ""
+                if fs["answers"]["text"]:
+                    gold_text = fs["answers"]["text"][0]
+                messages.append({
+                    "role": "user",
+                    "content": f"文脈: {fs['context']}\n質問: {fs['question']}"
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": f"回答: {gold_text}"
+                })
+            messages.append({
+                "role": "user",
+                "content": f"文脈: {item['context']}\n質問: {item['question']}"
+            })
+            conversation = {"messages": messages}
+            tokens = tokenizer.render_for_completion(conversation)
+        else:
+            prompt = build_jsquad_prompt(item, fewshot_items)
+            tokens = tokenizer.encode(prompt, prepend=bos_id)
 
         if len(tokens) > 2048:
             tokens = tokens[-2048:]
 
-        generated_ids = list(model.generate(tokens, max_tokens=32, temperature=0.0))
+        if is_chat:
+            eos_id = tokenizer.encode_special("<|assistant_end|>")
+            generated_ids = list(
+                model.generate_chat(
+                    tokens, max_tokens=32, temperature=0.0, eos_token_id=eos_id
+                )
+            )
+        else:
+            generated_ids = list(
+                model.generate(tokens, max_tokens=32, temperature=0.0)
+            )
+
         prediction = tokenizer.decode(generated_ids).strip()
+        if is_chat and prediction.startswith("回答:"):
+            prediction = prediction[len("回答:"):].strip()
         if "\n" in prediction:
             prediction = prediction.split("\n")[0]
         prediction = prediction.strip()
@@ -304,7 +426,13 @@ def build_niilc_prompt(item, fewshot_items):
 
 
 def evaluate_niilc_qa(
-    model, tokenizer, device, num_samples=100, num_fewshot=4, seed=42
+    model,
+    tokenizer,
+    device,
+    num_samples=100,
+    num_fewshot=4,
+    seed=42,
+    is_chat=False,
 ):
     """
     Computes NIILC-QA (v1.2) dev split exact match (EM) and character F1.
@@ -345,14 +473,53 @@ def evaluate_niilc_qa(
         fewshot_items = get_fewshot_examples(
             ds, eval_indices, num_fewshot, seed=seed + idx
         )
-        prompt = build_niilc_prompt(item, fewshot_items)
-        tokens = tokenizer.encode(prompt, prepend=bos_id)
+        if is_chat:
+            messages = []
+            messages.append({
+                "role": "system",
+                "content": "あなたは親切なAIアシスタントです。"
+            })
+            for fs in fewshot_items:
+                q = fs.get("text") or fs.get("question")
+                ans = ""
+                if fs.get("answers"):
+                    ans = fs.get("answers")[0]
+                messages.append({
+                    "role": "user",
+                    "content": f"質問: {q}"
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": f"回答: {ans}"
+                })
+            messages.append({
+                "role": "user",
+                "content": f"質問: {question}"
+            })
+            conversation = {"messages": messages}
+            tokens = tokenizer.render_for_completion(conversation)
+        else:
+            prompt = build_niilc_prompt(item, fewshot_items)
+            tokens = tokenizer.encode(prompt, prepend=bos_id)
 
         if len(tokens) > 2048:
             tokens = tokens[-2048:]
 
-        generated_ids = list(model.generate(tokens, max_tokens=32, temperature=0.0))
+        if is_chat:
+            eos_id = tokenizer.encode_special("<|assistant_end|>")
+            generated_ids = list(
+                model.generate_chat(
+                    tokens, max_tokens=32, temperature=0.0, eos_token_id=eos_id
+                )
+            )
+        else:
+            generated_ids = list(
+                model.generate(tokens, max_tokens=32, temperature=0.0)
+            )
+
         prediction = tokenizer.decode(generated_ids).strip()
+        if is_chat and prediction.startswith("回答:"):
+            prediction = prediction[len("回答:"):].strip()
         if "\n" in prediction:
             prediction = prediction.split("\n")[0]
         prediction = prediction.strip()
@@ -379,9 +546,11 @@ def run_unified_evaluation(
     tokenizer,
     device,
     val_path=None,
+    val_loader=None,
     num_samples=100,
     num_fewshot=4,
     seed=42,
+    is_chat=False,
 ):
     """
     Synchronously runs the evaluations on all 4 Japanese benchmarks
@@ -400,6 +569,7 @@ def run_unified_evaluation(
         num_samples,
         num_fewshot,
         seed=seed,
+        is_chat=is_chat,
     )
     results["eval/jcommonsenseqa_acc"] = jc_acc
 
@@ -411,6 +581,7 @@ def run_unified_evaluation(
         num_samples,
         num_fewshot,
         seed=seed,
+        is_chat=is_chat,
     )
     results["eval/jmmlu_acc"] = jmmlu_acc
 
@@ -422,6 +593,7 @@ def run_unified_evaluation(
         num_samples,
         num_fewshot,
         seed=seed,
+        is_chat=is_chat,
     )
     results["eval/jsquad_em"] = js_em
     results["eval/jsquad_f1"] = js_f1
@@ -434,6 +606,7 @@ def run_unified_evaluation(
         num_samples,
         num_fewshot,
         seed=seed,
+        is_chat=is_chat,
     )
     results["eval/niilc_em"] = ni_em
     results["eval/niilc_f1"] = ni_f1
@@ -446,6 +619,16 @@ def run_unified_evaluation(
             results["val/loss"] = val_loss
         except Exception as e:
             logger.warning(f"Failed computing PPL: {e}")
+
+    if val_loader:
+        logger.info("Evaluating validation sft loss...")
+        try:
+            ppl, val_loss = evaluate_sft_val_loss(raw_model, val_loader, eval_steps=num_samples, device=device)
+            results["val/sft_perplexity"] = ppl
+            results["val/sft_loss"] = val_loss
+        except Exception as e:
+            logger.warning(f"Failed computing sft PPL: {e}")
+
 
     raw_model.train()
     return results

@@ -325,3 +325,49 @@ class GPT(nn.Module):
 
             ids = torch.cat((ids, next_ids), dim=1)
             yield next_ids.item()
+
+    @torch.inference_mode()
+    def generate_chat(
+        self,
+        tokens,
+        max_tokens,
+        temperature=1.0,
+        top_k=None,
+        seed=42,
+        eos_token_id=None,
+    ):
+        """
+        Autoregressive generator for chat that stops when eos_token_id is met.
+        """
+        assert isinstance(tokens, list)
+        device = self.get_device()
+
+        generator = None
+        if temperature > 0:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(seed)
+
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)
+        for _ in range(max_tokens):
+            logits = self.forward(ids)
+            logits = logits[:, -1, :]
+
+            if top_k is not None and top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf")
+
+            if temperature > 0:
+                logits = logits / temperature
+                probs = F.softmax(logits, dim=-1)
+                next_ids = torch.multinomial(
+                    probs, num_samples=1, generator=generator
+                )
+            else:
+                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
+
+            token_id = next_ids.item()
+            if eos_token_id is not None and token_id == eos_token_id:
+                break
+
+            ids = torch.cat((ids, next_ids), dim=1)
+            yield token_id
