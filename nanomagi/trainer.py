@@ -164,7 +164,8 @@ class Trainer:
         self.num_val_samples = self.config.data.get("num_val_samples", 10000)
         self.save_interval = self.config.training.get("save_interval", 1000)
         self.output_dir = self.config.training.get("save_dir", "results")
-        os.makedirs(self.output_dir, exist_ok=True)
+        if self.global_rank == 0:
+            os.makedirs(self.output_dir, exist_ok=True)
 
         if hasattr(torch, "compile") and self.config.training.get(
             "compile_model", True
@@ -201,11 +202,10 @@ class Trainer:
         return prompts
 
     def setup_device(self):
-        ddp_active, rank, l_rank, world_size = get_dist_info()
-        self.is_ddp = ddp_active
-        self.global_rank = rank
-        self.local_rank = l_rank
-        self.world_size = world_size
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.global_rank = int(os.environ.get("RANK", 0))
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.is_ddp = self.world_size > 1
 
         if self.is_ddp and not dist.is_initialized():
             print(
@@ -226,7 +226,10 @@ class Trainer:
 
         if self.global_rank == 0:
             dtype_str = self.config.training.get("dtype", "bf16")
-            print(f"Training on {self.world_size} GPUs. Precision: {dtype_str}")
+            print(
+                f"Training on {self.world_size} GPUs. "
+                f"Precision: {dtype_str}"
+            )
 
         self.autocast_dtype = gpu_setup(self.device)
         print(f"Using {self.autocast_dtype} for autocast")
@@ -309,7 +312,21 @@ class Trainer:
             accum_loss = torch.tensor([0.0], device=self.device)
             for micro_step in range(self.grad_accum_steps):
                 inputs, targets, state_dict = next(train_loader)
-                loss_val = self.train_step(inputs, targets)
+
+                # Determine DDP synchronizations on step bounds
+                if self.is_ddp:
+                    if self.grad_offloader is not None:
+                        context = self.model.no_sync()
+                    elif micro_step < self.grad_accum_steps - 1:
+                        context = self.model.no_sync()
+                    else:
+                        context = contextlib.nullcontext()
+                else:
+                    context = contextlib.nullcontext()
+
+                with context:
+                    loss_val = self.train_step(inputs, targets)
+
                 accum_loss += loss_val
 
             if self.grad_offloader is not None:
@@ -427,5 +444,7 @@ class Trainer:
                 break
 
         pbar.close()
+        if self.is_ddp:
+            dist.destroy_process_group()
         if self.use_wandb and self.global_rank == 0:
             self.wandb.finish()

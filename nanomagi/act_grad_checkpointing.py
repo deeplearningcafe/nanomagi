@@ -224,35 +224,55 @@ def initialize_unsloth_gradient_checkpointing(dtype=None):
         CPU_BUFFERS.append(x)
     pass
 
-    # Allocate buffers to how many GPUs
+    # Determine total visible GPUs in the environment
     n_gpus = (
-        torch.cuda.device_count() if DEVICE_TYPE == "cuda" else torch.xpu.device_count()
-    )
-    GPU_BUFFERS = tuple(
-        [
-            torch.empty(2 * 256 * 2048, dtype=dtype, device=f"{DEVICE_TYPE}:{i}")
-            for i in range(n_gpus)
-        ]
+        torch.cuda.device_count()
+        if DEVICE_TYPE == "cuda"
+        else torch.xpu.device_count()
     )
 
-    BACKWARD_PASS = True
-    EXTRA_STREAMS = tuple(
-        [
-            torch.cuda.Stream() if DEVICE_TYPE == "cuda" else torch.xpu.Stream()
-            for i in range(n_gpus)
-        ]
-    )
+    # Fetch the active device index set for the current process
     if DEVICE_TYPE == "cuda":
-        MAIN_STREAMS = tuple(
-            [
-                torch.cuda.default_stream(torch.device(f"cuda:{i}"))
-                for i in range(n_gpus)
-            ]
+        current_device_idx = torch.cuda.current_device()
+    elif DEVICE_TYPE == "xpu":
+        current_device_idx = torch.xpu.current_device()
+    else:
+        current_device_idx = 0
+
+    # Initialize a sparse container to allocate buffers only on the active GPU
+    GPU_BUFFERS = [None] * n_gpus
+    GPU_BUFFERS[current_device_idx] = torch.empty(
+        2 * 256 * 2048,
+        dtype=dtype,
+        device=f"{DEVICE_TYPE}:{current_device_idx}"
+    )
+    GPU_BUFFERS = tuple(GPU_BUFFERS)
+
+    BACKWARD_PASS = True
+
+    # Allocate a stream only on the process's active GPU
+    EXTRA_STREAMS = [None] * n_gpus
+    if DEVICE_TYPE == "cuda":
+        EXTRA_STREAMS[current_device_idx] = torch.cuda.Stream(
+            device=current_device_idx
         )
     elif DEVICE_TYPE == "xpu":
-        MAIN_STREAMS = tuple(
-            [torch.xpu.current_stream(torch.device(f"xpu:{i}")) for i in range(n_gpus)]
+        EXTRA_STREAMS[current_device_idx] = torch.xpu.Stream(
+            device=current_device_idx
         )
+    EXTRA_STREAMS = tuple(EXTRA_STREAMS)
+
+    # Bind default streams exclusively on the process's active GPU
+    MAIN_STREAMS = [None] * n_gpus
+    if DEVICE_TYPE == "cuda":
+        MAIN_STREAMS[current_device_idx] = torch.cuda.default_stream(
+            torch.device(f"cuda:{current_device_idx}")
+        )
+    elif DEVICE_TYPE == "xpu":
+        MAIN_STREAMS[current_device_idx] = torch.xpu.current_stream(
+            torch.device(f"xpu:{current_device_idx}")
+        )
+    MAIN_STREAMS = tuple(MAIN_STREAMS)
 
     # Minimum size to enable Unsloth GC is 2MB -> 32 layers = 64MB
     n_bytes = torch.finfo(dtype).bits // 8
@@ -264,8 +284,6 @@ def initialize_unsloth_gradient_checkpointing(dtype=None):
     LAST_GC_INDEX = 0
     FIRST_PASS = True
     CURRENT_GC_INDEX = 0
-
-
 class UnslothCheckpointFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, run_function, preserve_rng_state, *args):

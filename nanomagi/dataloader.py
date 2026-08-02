@@ -53,11 +53,15 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         raise ValueError("Only train split streaming is supported.")
 
     row_capacity = T + 1
+
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    base_seed = seed - ddp_rank if ddp else seed
+
     mixed_ds = get_mixed_streaming_dataset(
         stage=stage,
         split=split,
         num_val_samples=num_val_samples,
-        seed=seed,
+        seed=base_seed,
     )
     batches = _document_batches(mixed_ds, tokenizer_batch_size)
 
@@ -151,12 +155,16 @@ def sft_data_loader_bos_bestfit(
     SFT Dataloader with BOS-aligned Best-Fit Packing and loss masking.
     Computes loss only on assistant part and masks padding.
     """
-    dataset = get_sft_dataset(split=split, seed=seed)
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+
+    # Recover base seed across DDP ranks to keep dataset splits consistent
+    base_seed = seed - ddp_rank if ddp else seed
+
+    dataset = get_sft_dataset(split=split, seed=base_seed)
+
     dataset_size = len(dataset)
     row_capacity = T + 1
     bos_token = tokenizer.get_bos_token_id()
-
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
     # Conversation buffer: list of (token_ids, loss_mask) tuples
     conv_buffer = []
