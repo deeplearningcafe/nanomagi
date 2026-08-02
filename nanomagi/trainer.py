@@ -368,6 +368,7 @@ class Trainer:
                         prompts=self.prompts,
                         output_dir=self.output_dir,
                         temperature=1.0,
+                        is_chat=is_sft,
                     )
                 if self.is_ddp:
                     dist.barrier()

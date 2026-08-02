@@ -53,12 +53,17 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("cos_cached", cos, persistent=False)
         self.register_buffer("sin_cached", sin, persistent=False)
 
-    def forward(self, x, seq_len: int):
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len, device=x.device)
+    def forward(self, x, seq_len: int, start_pos: int = 0):
+        total_len = start_pos + seq_len
+        if total_len > self.max_seq_len_cached:
+            self._set_cos_sin_cache(total_len, device=x.device)
         return (
-            self.cos_cached[:, :seq_len].to(x.device, dtype=x.dtype),
-            self.sin_cached[:, :seq_len].to(x.device, dtype=x.dtype),
+            self.cos_cached[:, start_pos:total_len].to(
+                x.device, dtype=x.dtype
+            ),
+            self.sin_cached[:, start_pos:total_len].to(
+                x.device, dtype=x.dtype
+            ),
         )
 
 
@@ -115,7 +120,7 @@ class CausalSelfAttention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
         self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, layer_idx=None, kv_cache=None):
         B, T, C = x.size()
 
         qkv = self.c_attn(x)
@@ -137,6 +142,16 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if kv_cache is not None and layer_idx is not None:
+            pos = kv_cache.get_pos()
+            k_cache, v_cache = kv_cache.get_layer_cache(layer_idx)
+            # Write new key/value representations to allocated positions
+            k_cache[:, :, pos : pos + T, :] = k
+            v_cache[:, :, pos : pos + T, :] = v
+            # Extract cumulative keys and values
+            k = k_cache[:, :, : pos + T, :]
+            v = v_cache[:, :, : pos + T, :]
 
         # Repeat K, V heads
         if self.n_head != self.n_kv_head:
@@ -165,8 +180,14 @@ class Block(nn.Module):
         self.mlp = SwiGLU(config.n_embd, config.intermediate_size)
         self.use_checkpointing = config.use_checkpointing
 
-    def forward(self, x, cos, sin):
-        x = x + self.self_attn(self.input_layernorm(x), cos, sin)
+    def forward(self, x, cos, sin, layer_idx=None, kv_cache=None):
+        x = x + self.self_attn(
+            self.input_layernorm(x),
+            cos,
+            sin,
+            layer_idx=layer_idx,
+            kv_cache=kv_cache,
+        )
         if self.use_checkpointing:
             mlp_out = torch.utils.checkpoint.checkpoint(
                 self.mlp,
@@ -262,16 +283,17 @@ class GPT(nn.Module):
         t = self.config.max_position_embeddings
         return 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
-    def forward(self, idx, targets=None, loss_reduction="mean"):
+    def forward(self, idx, targets=None, loss_reduction="mean", kv_cache=None):
         B, T = idx.size()
+        start_pos = 0 if kv_cache is None else kv_cache.get_pos()
 
         # Fetch position-aligned rotary embeddings
-        cos, sin = self.rotary_emb(idx, T)
+        cos, sin = self.rotary_emb(idx, T, start_pos=start_pos)
 
         x = self.transformer.wte(idx)
 
-        for block in self.transformer.h:
-            x = block(x, cos, sin)
+        for i, block in enumerate(self.transformer.h):
+            x = block(x, cos, sin, layer_idx=i, kv_cache=kv_cache)
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)
@@ -282,6 +304,9 @@ class GPT(nn.Module):
         softcap = 15.0
         logits = softcap * torch.tanh(logits / softcap)
         logits = logits.to(x.dtype)
+
+        if kv_cache is not None:
+            kv_cache.advance(T)
 
         if targets is not None:
             loss = F.cross_entropy(

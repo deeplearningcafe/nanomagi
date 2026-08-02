@@ -15,6 +15,7 @@ def log_generations(
     output_dir="results",
     max_gen_tokens=64,
     temperature=1.0,
+    is_chat=False,
 ):
     """
     Training callback to trace qualitative generative progression over steps.
@@ -26,15 +27,36 @@ def log_generations(
     bos_id = tokenizer.get_bos_token_id()
 
     for prompt in prompts:
-        tokens = tokenizer.encode(prompt, prepend=bos_id)
-
-        generated_ids = list(
-            model.generate(
-                tokens,
-                max_tokens=max_gen_tokens,
-                temperature=temperature,
+        if is_chat:
+            conversation = {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "あなたは親切なAIアシスタントです。"
+                    },
+                    {"role": "user", "content": prompt}
+                ]
+            }
+            tokens = tokenizer.render_for_completion(conversation)
+            eos_id = tokenizer.encode_special("<|assistant_end|>")
+            generated_ids = list(
+                model.generate_chat(
+                    tokens,
+                    max_tokens=max_gen_tokens,
+                    temperature=temperature,
+                    eos_token_id=eos_id,
+                )
             )
-        )
+        else:
+            tokens = tokenizer.encode(prompt, prepend=bos_id)
+            generated_ids = list(
+                model.generate(
+                    tokens,
+                    max_tokens=max_gen_tokens,
+                    temperature=temperature,
+                )
+            )
+
         decoded_text = tokenizer.decode(generated_ids)
         log_data.append(
             f"**Prompt:** {prompt}\n\n**Generation:** {decoded_text}\n\n---"
