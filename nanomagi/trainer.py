@@ -292,10 +292,11 @@ class Trainer:
                 device=self.device,
             )
 
-            # build val dataset, only pretraining
-            build_static_validation_set(
-                output_path=self.val_path, num_samples=self.num_val_samples, seed=self.seed
-            )
+            if self.global_rank == 0:
+                # build val dataset, only pretraining
+                build_static_validation_set(
+                    output_path=self.val_path, num_samples=self.num_val_samples, seed=self.seed
+                )
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)

@@ -1,6 +1,10 @@
 import os
 import logging
 import json
+import fsspec.spec
+import fsspec.utils
+import pyarrow
+import pyarrow.dataset as pad
 from datasets import load_dataset, interleave_datasets
 from datasets.distributed import split_dataset_by_node
 
@@ -23,24 +27,56 @@ def get_mixed_streaming_dataset(
     """
     logger.info("Initializing multi-stage Japanese pretraining streams...")
 
+    # Configure global fsspec block sizes to 128 MiB to minimize API requests
+    fsspec.spec.AbstractBufferedFile.DEFAULT_BLOCK_SIZE = 128 * 1024 * 1024
+    fsspec.utils.DEFAULT_BLOCK_SIZE = 128 * 1024 * 1024
+
+    # Caching options passed to remote fsspec filesystems (JSONL, text, etc.)
+    storage_options = {
+        "block_size": 128 * 1024 * 1024,
+        "cache_type": "readahead",
+    }
+
+    # Prefetch scan options specifically optimized for Parquet-based streaming
+    fragment_scan_options = pad.ParquetFragmentScanOptions(
+        cache_options=pyarrow.CacheOptions(
+            prefetch_limit=2,
+            range_size_limit=128 << 20,
+        ),
+    )
+
     fw_ds = load_dataset(
         "hotchpotch/fineweb-2-edu-japanese",
-        name="default", #"sample_10BT",
+        name="default",
         split="train",
         streaming=True,
+        storage_options=storage_options,
+        fragment_scan_options=fragment_scan_options,
     ).select_columns(["text"])
+
+    abeja_cc_ds = load_dataset(
+        "kajuma/ABEJA-CC-JA-edu",
+        name="10%",
+        split="train",
+        streaming=True,
+        storage_options=storage_options,
+        fragment_scan_options=fragment_scan_options,
+    ).select_columns(["content"])
 
     wiki_ds = load_dataset(
         "izumi-lab/wikipedia-ja-20230720",
         split="train",
         streaming=True,
+        storage_options=storage_options,
     ).select_columns(["text"])
 
     aozora_ds = load_dataset(
         "globis-university/aozorabunko-clean",
         split="train",
         streaming=True,
+        storage_options=storage_options,
     )
+
     # Filter for modern Japanese
     aozora_ds = aozora_ds.filter(
         lambda row: row["meta"].get("文字遣い種別") == "新字新仮名"
@@ -48,14 +84,14 @@ def get_mixed_streaming_dataset(
 
     # Assign mixture coefficients
     if stage == 1:
-        probs = [0.815, 0.165, 0.02]
+        probs = [0.58, 0.30, 0.10, 0.02]
     elif stage == 2:
-        probs = [0.40, 0.45, 0.15]
+        probs = [0.30, 0.20, 0.35, 0.15]
     else:
         raise ValueError(f"Invalid dataset mixture stage: {stage}")
 
     mixed_dataset = interleave_datasets(
-        [fw_ds, wiki_ds, aozora_ds],
+        [fw_ds, abeja_cc_ds, wiki_ds, aozora_ds],
         probabilities=probs,
         seed=seed,
     )
