@@ -19,7 +19,7 @@ def _document_batches(iterable_dataset, tokenizer_batch_size=128):
 
         batch = []
         for example in iterable_dataset:
-            text = example.get("text")
+            text = example.get("text") or example.get("content")
             if text:
                 batch.append(text)
                 if len(batch) == tokenizer_batch_size:

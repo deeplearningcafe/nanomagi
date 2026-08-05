@@ -77,6 +77,18 @@ def main():
         help="Top-k filtering parameter",
     )
     parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.9,
+        help="Top-p (nucleus) sampling parameter",
+    )
+    parser.add_argument(
+        "--rep-penalty",
+        type=float,
+        default=1.15,
+        help="Repetition penalty parameter",
+    )
+    parser.add_argument(
         "-d",
         "--device",
         type=str,
@@ -132,6 +144,8 @@ def main():
             max_tokens=256,
             temperature=args.temp,
             top_k=args.top_k,
+            top_p=args.top_p,
+            repetition_penalty=args.rep_penalty,
         ):
             token = token_column[0]
             response_tokens.append(token)
@@ -192,6 +206,8 @@ def main():
                 max_tokens=512,
                 temperature=args.temp,
                 top_k=args.top_k,
+                top_p=args.top_p,
+                repetition_penalty=args.rep_penalty,
             ):
                 token = token_column[0]
                 response_tokens.append(token)
@@ -245,6 +261,8 @@ def main():
                 max_tokens=256,
                 temperature=args.temp,
                 top_k=args.top_k,
+                top_p=args.top_p,
+                repetition_penalty=args.rep_penalty,
             ):
                 token = token_column[0]
                 response_tokens.append(token)

@@ -116,7 +116,7 @@ class Trainer:
                     stage_steps = max(1, self.num_iterations - self.start_step)
 
                 skip_warmup = self.config.optimizer.get("skip_warmup", False)
-                # TODO: clear memory
+                # TODO: clear memory, decuple optimizer from scheduler
                 self.optimizer, self.scheduler = create_optim_scheduler(
                     self.model,
                     total_steps=stage_steps,
@@ -295,7 +295,10 @@ class Trainer:
             if self.global_rank == 0:
                 # build val dataset, only pretraining
                 build_static_validation_set(
-                    output_path=self.val_path, num_samples=self.num_val_samples, seed=self.seed
+                    output_path=self.val_path,
+                    stage=stage,
+                    num_samples=self.num_val_samples,
+                    seed=self.seed,
                 )
 
         self.model.train()

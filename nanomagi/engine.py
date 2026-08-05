@@ -77,21 +77,57 @@ class KVCache:
 
 
 @torch.inference_mode()
-def sample_next_token(logits, rng, temperature=1.0, top_k=None):
+def sample_next_token(
+    logits,
+    rng,
+    temperature=1.0,
+    top_k=None,
+    top_p=None,
+    repetition_penalty=1.0,
+    generated_tokens=None,
+):
+    """
+    Samples next token with top-k, top-p, and repetition penalty support.
+    """
     assert temperature >= 0.0, "Temperature cannot be negative."
+
+    if repetition_penalty != 1.0 and generated_tokens is not None:
+        for b_idx, tokens_list in enumerate(generated_tokens):
+            for t_id in set(tokens_list):
+                if logits[b_idx, t_id] < 0:
+                    logits[b_idx, t_id] *= repetition_penalty
+                else:
+                    logits[b_idx, t_id] /= repetition_penalty
+
     if temperature == 0.0:
         return torch.argmax(logits, dim=-1, keepdim=True)
+
+    logits = logits / temperature
+
     if top_k is not None and top_k > 0:
         k = min(top_k, logits.size(-1))
-        vals, idx = torch.topk(logits, k, dim=-1)
-        vals = vals / temperature
-        probs = F.softmax(vals, dim=-1)
-        choice = torch.multinomial(probs, num_samples=1, generator=rng)
-        return idx.gather(1, choice)
-    else:
-        logits = logits / temperature
-        probs = F.softmax(logits, dim=-1)
-        return torch.multinomial(probs, num_samples=1, generator=rng)
+        v, _ = torch.topk(logits, k, dim=-1)
+        logits[logits < v[:, [-1]]] = -float("Inf")
+
+    if top_p is not None and 0.0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(
+            logits, descending=True, dim=-1
+        )
+        cumulative_probs = torch.cumsum(
+            F.softmax(sorted_logits, dim=-1), dim=-1
+        )
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+            ..., :-1
+        ].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            1, sorted_indices, sorted_indices_to_remove
+        )
+        logits[indices_to_remove] = -float("Inf")
+
+    probs = F.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1, generator=rng)
 
 
 class RowState:
@@ -115,6 +151,8 @@ class Engine:
         max_tokens=None,
         temperature=1.0,
         top_k=None,
+        top_p=None,
+        repetition_penalty=1.0,
         seed=42,
     ):
         assert isinstance(tokens, list) and isinstance(
@@ -171,7 +209,16 @@ class Engine:
             if all(state.completed for state in row_states):
                 break
 
-            next_ids = sample_next_token(logits, rng, temperature, top_k)
+            gen_history = [state.current_tokens for state in row_states]
+            next_ids = sample_next_token(
+                logits,
+                rng,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                generated_tokens=gen_history,
+            )
             sampled_tokens = next_ids[:, 0].tolist()
 
             token_column = []

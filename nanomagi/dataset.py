@@ -119,6 +119,7 @@ def get_mixed_streaming_dataset(
 
 def build_static_validation_set(
     output_path: str,
+    stage: int = 1,
     num_samples: int = 10000,
     seed: int = 42,
 ):
@@ -127,7 +128,7 @@ def build_static_validation_set(
     """
     logger.info(f"Building static validation dataset to {output_path}...")
     dataset = get_mixed_streaming_dataset(
-        stage=1, split="val", num_val_samples=num_samples, seed=seed
+        stage=stage, split="val", num_val_samples=num_samples, seed=seed
     )
 
     val_data = []

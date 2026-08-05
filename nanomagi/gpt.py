@@ -15,6 +15,7 @@ class GPTConfig:
     max_position_embeddings: int = 2048
     rope_theta: float = 100000.0
     use_checkpointing: bool = False
+    logit_softcap: float = 30.0
 
 
 class RotaryEmbedding(nn.Module):
@@ -159,9 +160,12 @@ class CausalSelfAttention(nn.Module):
             k = torch.repeat_interleave(k, num_queries_per_kv, dim=1)
             v = torch.repeat_interleave(v, num_queries_per_kv, dim=1)
 
+        # Causal mask is True only when full sequence is provided (T_q == T_k).
+        is_causal = T == k.size(2)
         y = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal
         )
+
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
@@ -300,10 +304,11 @@ class GPT(nn.Module):
 
         # Softcapping
         # Logit softcapping in float32 for training stability
-        logits = logits.float()
-        softcap = 15.0
-        logits = softcap * torch.tanh(logits / softcap)
-        logits = logits.to(x.dtype)
+        if self.config.logit_softcap > 0.0:
+            cap = self.config.logit_softcap
+            logits = logits.float()
+            logits = cap * torch.tanh(logits / cap)
+            logits = logits.to(x.dtype)
 
         if kv_cache is not None:
             kv_cache.advance(T)

@@ -47,7 +47,7 @@ def text_iterator_streaming(max_chars, doc_cap):
     nchars = 0
 
     for doc in dataset:
-        text = doc.get("text", "")
+        text = doc.get("text") or doc.get("content") or ""
         if len(text) > doc_cap:
             text = text[:doc_cap]
         nchars += len(text)
