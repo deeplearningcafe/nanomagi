@@ -614,9 +614,10 @@ def run_unified_evaluation(
     if val_path and os.path.exists(val_path):
         logger.info("Evaluating validation perplexity...")
         try:
-            ppl, val_loss = compute_perplexity(raw_model, tokenizer, val_path, device)
+            ppl, val_loss, bpb = compute_perplexity(raw_model, tokenizer, val_path, device)
             results["val/perplexity"] = ppl
             results["val/loss"] = val_loss
+            results["val/bpb"] = bpb
         except Exception as e:
             logger.warning(f"Failed computing PPL: {e}")
 

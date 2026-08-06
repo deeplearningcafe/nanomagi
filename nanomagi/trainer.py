@@ -448,7 +448,27 @@ class Trainer:
                 break
 
         pbar.close()
+        final_metrics = {}
+        if self.global_rank == 0:
+            logger.info("Running final evaluation for scaling law tracking...")
+            try:
+                final_metrics = run_unified_evaluation(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    device=self.device,
+                    val_path=self.val_path if not is_sft else None,
+                    val_loader=sft_val_loader,
+                    num_samples=100,
+                    num_fewshot=4,
+                    seed=self.seed,
+                    is_chat=is_sft,
+                )
+            except Exception as e:
+                logger.warning(f"Final evaluation failed: {e}")
+
         if self.is_ddp:
             dist.destroy_process_group()
         if self.use_wandb and self.global_rank == 0:
             self.wandb.finish()
+
+        return final_metrics
