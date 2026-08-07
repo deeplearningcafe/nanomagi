@@ -4,10 +4,12 @@ import logging
 import torch
 import numpy as np
 import random
+import contextlib
 from tqdm.auto import tqdm
 from omegaconf import DictConfig, OmegaConf
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks as default
 from datetime import datetime
 
 from nanomagi.dataloader import (
@@ -64,6 +66,9 @@ class Trainer:
         self.grad_clip = self.config.training.get("grad_clip", 1.0)
         self.grad_accum_steps = self.config.training.get(
             "gradient_accumulation_steps", 1
+        )
+        self.use_cpu_accumulator = self.config.training.get(
+            "use_cpu_accumulator", False
         )
         self.tokens_per_step = (
             self.batch_size * self.max_seq_len * self.grad_accum_steps * self.world_size
@@ -144,7 +149,6 @@ class Trainer:
             )
             logger.info(f"Total training iterations: {self.num_iterations:,}")
 
-
         self.scaler = (
             torch.amp.GradScaler("cuda")
             if self.autocast_dtype == torch.float16
@@ -181,9 +185,10 @@ class Trainer:
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
             )
+            self.model.register_comm_hook(state=None, hook=default.bf16_compress_hook)
 
         self.grad_offloader = None
-        if self.grad_accum_steps > 1:
+        if self.use_cpu_accumulator and self.grad_accum_steps > 1:
             self.grad_offloader = CPUGradientAccumulator(self.model)
 
     def _load_sample_configs(self):
@@ -226,10 +231,7 @@ class Trainer:
 
         if self.global_rank == 0:
             dtype_str = self.config.training.get("dtype", "bf16")
-            print(
-                f"Training on {self.world_size} GPUs. "
-                f"Precision: {dtype_str}"
-            )
+            print(f"Training on {self.world_size} GPUs. Precision: {dtype_str}")
 
         self.autocast_dtype = gpu_setup(self.device)
         print(f"Using {self.autocast_dtype} for autocast")
@@ -377,7 +379,9 @@ class Trainer:
                     )
                 pbar.set_postfix({"loss": f"{avg_loss.item():.4f}", "lr": f"{lr:.2e}"})
 
-            if (self.sample_interval > 0 and step % self.sample_interval == 0) or is_last_step:
+            if (
+                self.sample_interval > 0 and step % self.sample_interval == 0
+            ) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Generating samples at step {step}")
 
@@ -395,7 +399,9 @@ class Trainer:
                     dist.barrier()
 
             # Benchmark evaluation
-            if (self.eval_interval > 0 and step % self.eval_interval == 0) or is_last_step:
+            if (
+                self.eval_interval > 0 and step % self.eval_interval == 0
+            ) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Running benchmark evaluation at step {step}")
                     try:
@@ -430,7 +436,9 @@ class Trainer:
                 if self.is_ddp:
                     dist.barrier()
 
-            if (self.save_interval > 0 and step % self.save_interval == 0) or is_last_step:
+            if (
+                self.save_interval > 0 and step % self.save_interval == 0
+            ) or is_last_step:
                 if self.global_rank == 0:
                     logger.info(f"Saving checkpoint at step {step}")
                     save_checkpoint(
@@ -450,9 +458,7 @@ class Trainer:
         pbar.close()
         final_metrics = {}
         if self.global_rank == 0:
-            logger.info(
-                "Running final evaluation for scaling law tracking..."
-            )
+            logger.info("Running final evaluation for scaling law tracking...")
             try:
                 final_metrics = run_unified_evaluation(
                     model=self.model,

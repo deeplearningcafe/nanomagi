@@ -2,6 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+from liger_kernel.transformers import (
+    LigerRMSNorm,
+    LigerFusedLinearCrossEntropyLoss,
+    liger_rotary_pos_emb,
+)
+from liger_kernel.ops import LigerSiLUMulFunction
 
 
 @dataclass
@@ -20,7 +26,7 @@ class GPTConfig:
 
 class RotaryEmbedding(nn.Module):
     """
-    1D Rotary Position Embedding (RoPE) module.
+    1D Rotary Position Embedding (RoPE) module formatted for Liger.
     """
 
     def __init__(
@@ -47,9 +53,9 @@ class RotaryEmbedding(nn.Module):
         # [seq_len, dim // 2] -> [seq_len, dim]
         emb = torch.cat((freqs, freqs), dim=-1)
 
-        # [seq_len, dim] -> [1, seq_len, 1, dim]
-        cos = emb.cos().unsqueeze(0).unsqueeze(2)
-        sin = emb.sin().unsqueeze(0).unsqueeze(2)
+        # [seq_len, dim] -> [1, seq_len, dim] for Liger RoPE kernel
+        cos = emb.cos().unsqueeze(0)
+        sin = emb.sin().unsqueeze(0)
 
         self.register_buffer("cos_cached", cos, persistent=False)
         self.register_buffer("sin_cached", sin, persistent=False)
@@ -59,12 +65,8 @@ class RotaryEmbedding(nn.Module):
         if total_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(total_len, device=x.device)
         return (
-            self.cos_cached[:, start_pos:total_len].to(
-                x.device, dtype=x.dtype
-            ),
-            self.sin_cached[:, start_pos:total_len].to(
-                x.device, dtype=x.dtype
-            ),
+            self.cos_cached[:, start_pos:total_len].to(x.device, dtype=x.dtype),
+            self.sin_cached[:, start_pos:total_len].to(x.device, dtype=x.dtype),
         )
 
 
@@ -94,12 +96,12 @@ class SwiGLU(nn.Module):
         self.w3 = nn.Linear(intermediate_size, dim, bias=False)
 
     def forward(self, x):
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+        return self.w3(LigerSiLUMulFunction.apply(self.w1(x), self.w2(x)))
 
 
 class CausalSelfAttention(nn.Module):
     """
-    GQA-capable Causal Self-Attention with QK-Normalization and 1D RoPE.
+    GQA-capable Causal Self-Attention with QK-Normalization and Liger RoPE.
     """
 
     def __init__(self, config: GPTConfig):
@@ -117,9 +119,8 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(self.n_embd, qkv_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-        # TODO: remove params?
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
+        self.q_norm = LigerRMSNorm(self.head_dim, eps=1e-5)
+        self.k_norm = LigerRMSNorm(self.head_dim, eps=1e-5)
 
     def forward(self, x, cos, sin, layer_idx=None, kv_cache=None):
         B, T, C = x.size()
@@ -137,12 +138,12 @@ class CausalSelfAttention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
-        # to [B, H, T, D]
+        # Transpose to (B, H, T, D) for liger_rotary_pos_emb
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        q, k = liger_rotary_pos_emb(q, k, cos, sin)
 
         if kv_cache is not None and layer_idx is not None:
             pos = kv_cache.get_pos()
@@ -166,7 +167,6 @@ class CausalSelfAttention(nn.Module):
             q, k, v, attn_mask=None, dropout_p=0.0, is_causal=is_causal
         )
 
-
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 
@@ -178,9 +178,9 @@ class Block(nn.Module):
 
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.input_layernorm = nn.RMSNorm(config.n_embd)
+        self.input_layernorm = LigerRMSNorm(config.n_embd)
         self.self_attn = CausalSelfAttention(config)
-        self.post_attention_layernorm = nn.RMSNorm(config.n_embd)
+        self.post_attention_layernorm = LigerRMSNorm(config.n_embd)
         self.mlp = SwiGLU(config.n_embd, config.intermediate_size)
         self.use_checkpointing = config.use_checkpointing
 
@@ -219,10 +219,14 @@ class GPT(nn.Module):
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
                 "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                "ln_f": nn.RMSNorm(config.n_embd),
+                "ln_f": LigerRMSNorm(config.n_embd),
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        softcap = self.config.logit_softcap if self.config.logit_softcap > 0.0 else None
+        self.loss_fn = LigerFusedLinearCrossEntropyLoss(
+            ignore_index=-1, softcap=softcap
+        )
 
         # Initialize RoPE 1D
         self.rotary_emb = RotaryEmbedding(
@@ -285,7 +289,8 @@ class GPT(nn.Module):
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
         t = self.config.max_position_embeddings
-        return 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        factor = 6 if not self.use_checkpointing else 8
+        return factor * (nparams - nparams_embedding) + 12 * l * h * q * t
 
     def forward(self, idx, targets=None, loss_reduction="mean", kv_cache=None):
         B, T = idx.size()
@@ -300,28 +305,27 @@ class GPT(nn.Module):
             x = block(x, cos, sin, layer_idx=i, kv_cache=kv_cache)
         x = self.transformer.ln_f(x)
 
-        logits = self.lm_head(x)
-
-        # Softcapping
-        # Logit softcapping in float32 for training stability
-        if self.config.logit_softcap > 0.0:
-            cap = self.config.logit_softcap
-            logits = logits.float()
-            logits = cap * torch.tanh(logits / cap)
-            logits = logits.to(x.dtype)
-
         if kv_cache is not None:
             kv_cache.advance(T)
 
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
+            # Chunked Liger Fused Linear Cross Entropy
+            loss = self.loss_fn(
+                self.lm_head.weight,
+                x.view(-1, x.size(-1)),
                 targets.view(-1),
-                ignore_index=-1,
-                reduction=loss_reduction,
             )
             return loss
         else:
+            logits = self.lm_head(x)
+
+            # Softcapping in float32 for generation stability
+            if self.config.logit_softcap > 0.0:
+                cap = self.config.logit_softcap
+                logits = logits.float()
+                logits = cap * torch.tanh(logits / cap)
+                logits = logits.to(x.dtype)
+
             return logits
 
     @torch.inference_mode()
@@ -389,9 +393,7 @@ class GPT(nn.Module):
             if temperature > 0:
                 logits = logits / temperature
                 probs = F.softmax(logits, dim=-1)
-                next_ids = torch.multinomial(
-                    probs, num_samples=1, generator=generator
-                )
+                next_ids = torch.multinomial(probs, num_samples=1, generator=generator)
             else:
                 next_ids = torch.argmax(logits, dim=-1, keepdim=True)
 

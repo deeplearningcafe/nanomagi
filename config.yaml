@@ -26,6 +26,7 @@ tokenizer:
 
 training:
   use_gradient_checkpointing: True
+  use_cpu_accumulator: False
   device: "cuda"
   save_dir: "results"
   save_interval: 2500
