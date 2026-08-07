@@ -5,6 +5,8 @@ import math
 import argparse
 import logging
 from datetime import datetime
+import torch
+import torch.distributed as dist
 from omegaconf import OmegaConf
 
 from nanomagi.trainer import Trainer
@@ -36,7 +38,7 @@ def parse_args():
         "--depths",
         type=int,
         nargs="+",
-        default=[8, 10, 12, 14],
+        default=[8, 10, 12, 14, 16, 18],
         help="List of model depths to sweep (default: 8 10 12 14)",
     )
     parser.add_argument(
@@ -57,6 +59,16 @@ def parse_args():
 def run_isoflop_sweep():
     args = parse_args()
     base_cfg = OmegaConf.load(args.config)
+
+    # Initialize DDP process group once at the top level for sweeps
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_ddp = world_size > 1
+    if is_ddp and not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+
+    global_rank = int(os.environ.get("RANK", 0))
 
     os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
     csv_exists = os.path.exists(args.output_csv)
@@ -81,28 +93,30 @@ def run_isoflop_sweep():
     ref_embd = 12 * args.aspect_ratio
 
     for depth in args.depths:
+        torch.cuda.empty_cache()
         n_embd = depth * args.aspect_ratio
         n_head = depth
         n_kv_head = max(1, n_head // 2)
-        intermediate_size = round_to_multiple(int(n_embd * (8 / 3)), 128)
+        intermediate_size = round_to_multiple(
+            int(n_embd * (8 / 3)), 128
+        )
 
         # Scale learning rate inversely with sqrt(n_embd)
         scaled_lr = ref_lr * math.sqrt(ref_embd / n_embd)
 
         # Adapt device batch size and grad accum based on depth & VRAM
-        # Base case (d=12, n_embd=768): device_batch_size=32, grad_accum=4
-        if depth >= 28:
+        if depth >= 18:
             device_batch_size = 8
-        elif depth >= 16:
+        elif depth >= 12:
             device_batch_size = 16
         else:
-            # Capped at 32 for smaller models (d <= 12)
             device_batch_size = 32
 
-        # Reciprocally adjust gradient accumulation to preserve 128 seq/GPU
-        grad_accum_steps = (32 * 4) // device_batch_size
+        grad_accum_steps = (32 * 8) // (device_batch_size * world_size)
 
-        cfg = OmegaConf.create(OmegaConf.to_container(base_cfg, resolve=True))
+        cfg = OmegaConf.create(
+            OmegaConf.to_container(base_cfg, resolve=True)
+        )
         cfg.gpt.n_layer = depth
         cfg.gpt.n_embd = n_embd
         cfg.gpt.n_head = n_head
@@ -121,18 +135,30 @@ def run_isoflop_sweep():
         cfg.training.eval_interval = -1
         cfg.training.sample_interval = -1
 
+        # Synchronize directory timestamp from rank 0 across all ranks
+        if global_rank == 0:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        else:
+            timestamp = None
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        if is_ddp:
+            ts_container = [timestamp]
+            dist.broadcast_object_list(ts_container, src=0)
+            timestamp = ts_container[0]
+
         exp_name = f"isoflop_d{depth}_{timestamp}"
         cfg.experiment.name = exp_name
 
         save_dir = os.path.join(cfg.training.save_dir, exp_name)
-        Logger.setup_logging(save_dir=save_dir, logging_name=exp_name)
+        Logger.setup_logging(
+            save_dir=save_dir, logging_name=exp_name
+        )
 
         logger = logging.getLogger(__name__)
         logger.info(
             f"IsoFLOP run: Depth={depth}, n_embd={n_embd}, "
-            f"BatchSize={device_batch_size}, GradAccum={grad_accum_steps}, "
+            f"BatchSize={device_batch_size}, "
+            f"GradAccum={grad_accum_steps}, "
             f"LR={scaled_lr:.2e}, FLOPs={args.target_flops:.1e}"
         )
 
@@ -154,7 +180,9 @@ def run_isoflop_sweep():
             "device_batch_size": device_batch_size,
             "grad_accum_steps": grad_accum_steps,
             "non_embed_params": trainer.non_embed_params,
-            "total_params": sum(p.numel() for p in trainer.model.parameters()),
+            "total_params": sum(
+                p.numel() for p in trainer.model.parameters()
+            ),
             "target_flops": args.target_flops,
             "num_iterations": trainer.num_iterations,
             "tokens_trained": total_tokens,
@@ -164,20 +192,25 @@ def run_isoflop_sweep():
             "train_time_sec": round(elapsed_sec, 2),
         }
 
-        global_rank = int(os.environ.get("RANK", 0))
         if global_rank == 0:
-            with open(args.output_csv, "a", newline="", encoding="utf-8") as f:
+            with open(
+                args.output_csv, "a", newline="", encoding="utf-8"
+            ) as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 if not csv_exists:
                     writer.writeheader()
                     csv_exists = True
                 writer.writerow(row_data)
 
-        logger.info(
-            f"Done Depth={depth} in {elapsed_sec:.1f}s | "
-            f"Val Loss: {val_loss:.4f} | Val PPL: {val_ppl:.2f} | Val BPB: {val_bpb:.2f}"
-        )
+            logger.info(
+                f"Done Depth={depth} in {elapsed_sec:.1f}s | "
+                f"Val Loss: {val_loss:.4f} | Val PPL: {val_ppl:.2f} | "
+                f"Val BPB: {val_bpb:.2f}"
+            )
 
+    # Destroy process group once at the end of the entire sweep
+    if is_ddp:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     run_isoflop_sweep()

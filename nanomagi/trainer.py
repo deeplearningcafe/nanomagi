@@ -450,7 +450,9 @@ class Trainer:
         pbar.close()
         final_metrics = {}
         if self.global_rank == 0:
-            logger.info("Running final evaluation for scaling law tracking...")
+            logger.info(
+                "Running final evaluation for scaling law tracking..."
+            )
             try:
                 final_metrics = run_unified_evaluation(
                     model=self.model,
@@ -466,8 +468,13 @@ class Trainer:
             except Exception as e:
                 logger.warning(f"Final evaluation failed: {e}")
 
+        # Broadcast evaluation metrics from rank 0 and keep ranks synced
         if self.is_ddp:
-            dist.destroy_process_group()
+            metrics_container = [final_metrics]
+            dist.broadcast_object_list(metrics_container, src=0)
+            final_metrics = metrics_container[0]
+            dist.barrier()
+
         if self.use_wandb and self.global_rank == 0:
             self.wandb.finish()
 
