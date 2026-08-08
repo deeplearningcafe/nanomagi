@@ -289,7 +289,7 @@ class GPT(nn.Module):
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
         t = self.config.max_position_embeddings
-        factor = 6 if not self.use_checkpointing else 8
+        factor = 6 
         return factor * (nparams - nparams_embedding) + 12 * l * h * q * t
 
     def forward(self, idx, targets=None, loss_reduction="mean", kv_cache=None):

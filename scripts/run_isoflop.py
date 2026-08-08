@@ -105,8 +105,15 @@ def run_isoflop_sweep():
         scaled_lr = ref_lr * math.sqrt(ref_embd / n_embd)
 
         # Adapt device batch size and grad accum based on depth & VRAM
+        use_gradient_checkpointing = False
+        if depth >= 20:
+            device_batch_size = 8
+            use_gradient_checkpointing = True
         if depth >= 18:
             device_batch_size = 8
+        elif depth >= 16:
+            device_batch_size = 16
+            use_gradient_checkpointing = True
         elif depth >= 12:
             device_batch_size = 16
         else:
@@ -125,6 +132,7 @@ def run_isoflop_sweep():
 
         cfg.training.batch_size = device_batch_size
         cfg.training.gradient_accumulation_steps = grad_accum_steps
+        cfg.training.use_gradient_checkpointing = use_gradient_checkpointing
 
         cfg.optimizer.lr = scaled_lr
         cfg.training.target_flops = args.target_flops
