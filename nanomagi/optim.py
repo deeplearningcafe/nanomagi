@@ -59,10 +59,12 @@ def create_optim_scheduler(
             betas=(0.9, 0.95),
         )
     else:
+        use_fused = torch.cuda.is_available()
         optimizer = torch.optim.AdamW(
             param_groups,
             lr=lr_val,
             betas=(0.9, 0.95),
+            fused=use_fused,
         )
 
     scheduler = None

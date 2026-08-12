@@ -77,6 +77,7 @@ class Trainer:
         # Estimate FLOPs per token and non-embedding params
         self.num_flops_per_token = self.model.estimate_flops()
         self.non_embed_params = self.model.non_embed_params()
+        self.peak_tflops = self.config.get("gpu_peak_tflops", 165.2)
 
         num_iterations_cfg = self.config.training.get("num_iterations", -1)
         target_flops = self.config.training.get("target_flops", -1.0)
@@ -171,6 +172,17 @@ class Trainer:
         if self.global_rank == 0:
             os.makedirs(self.output_dir, exist_ok=True)
 
+        if self.is_ddp:
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                gradient_as_bucket_view=True,
+            )
+            self.model.register_comm_hook(
+                state=None, hook=default.bf16_compress_hook
+            )
+
         if hasattr(torch, "compile") and self.config.training.get(
             "compile_model", True
         ):
@@ -178,14 +190,6 @@ class Trainer:
             patch_torch_compile()
             patch_compiled_autograd()
             self.model = torch.compile(self.model)
-
-        if self.is_ddp:
-            self.model = DDP(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-            )
-            self.model.register_comm_hook(state=None, hook=default.bf16_compress_hook)
 
         self.grad_offloader = None
         if self.use_cpu_accumulator and self.grad_accum_steps > 1:
@@ -313,6 +317,7 @@ class Trainer:
             disable=self.global_rank != 0,
         )
 
+        step_start_time = time.perf_counter()
         while True:
             is_last_step = step >= self.num_iterations
             accum_loss = torch.tensor([0.0], device=self.device)
@@ -362,10 +367,18 @@ class Trainer:
             if self.scheduler is not None:
                 self.scheduler.step()
 
+            step_time = time.perf_counter() - step_start_time
+            step_start_time = time.perf_counter()
+
             step += 1
             pbar.update(1)
 
             avg_loss = accum_loss / self.grad_accum_steps
+            step_flops = self.num_flops_per_token * self.tokens_per_step
+            tflops_per_gpu = (
+                (step_flops / max(step_time, 1e-6)) / 1e12 / self.world_size
+            )
+            mfu = (tflops_per_gpu / self.peak_tflops) * 100.0
             if self.global_rank == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
                 if self.use_wandb:
@@ -373,11 +386,19 @@ class Trainer:
                         {
                             "train/loss": avg_loss.item(),
                             "train/lr": lr,
-                            "train/grad_norm": norm_val.item(),
+                            "train/grad_norm": norm_str,
+                            "train/tflops_per_gpu": tflops_per_gpu,
+                            "train/mfu": mfu,
                             "step": step,
                         }
                     )
-                pbar.set_postfix({"loss": f"{avg_loss.item():.4f}", "lr": f"{lr:.2e}"})
+                pbar.set_postfix(
+                    {
+                        "loss": f"{avg_loss.item():.4f}",
+                        "lr": f"{lr:.2e}",
+                        "mfu": f"{mfu:.1f}%",
+                    }
+                )
 
             if (
                 self.sample_interval > 0 and step % self.sample_interval == 0

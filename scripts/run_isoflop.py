@@ -38,7 +38,7 @@ def parse_args():
         "--depths",
         type=int,
         nargs="+",
-        default=[8, 10, 12, 14, 16, 18],
+        default=[22],
         help="List of model depths to sweep (default: 8 10 12 14)",
     )
     parser.add_argument(
@@ -106,10 +106,14 @@ def run_isoflop_sweep():
 
         # Adapt device batch size and grad accum based on depth & VRAM
         use_gradient_checkpointing = False
-        if depth >= 20:
+        use_bitsandbytes = False
+        if depth >= 22:
+            device_batch_size = 4
+            use_gradient_checkpointing = True
+        elif depth >= 20:
             device_batch_size = 8
             use_gradient_checkpointing = True
-        if depth >= 18:
+        elif depth >= 18:
             device_batch_size = 8
         elif depth >= 16:
             device_batch_size = 16
@@ -133,6 +137,7 @@ def run_isoflop_sweep():
         cfg.training.batch_size = device_batch_size
         cfg.training.gradient_accumulation_steps = grad_accum_steps
         cfg.training.use_gradient_checkpointing = use_gradient_checkpointing
+        cfg.optimizer.use_bitsandbytes = use_bitsandbytes
 
         cfg.optimizer.lr = scaled_lr
         cfg.training.target_flops = args.target_flops
